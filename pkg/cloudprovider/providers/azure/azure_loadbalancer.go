@@ -471,29 +471,42 @@ func (az *Cloud) ensurePublicIPExists(service *v1.Service, pipName string, domai
 	if err != nil {
 		return nil, err
 	}
-	if existsPip {
-		return &pip, nil
-	}
 
 	serviceName := getServiceName(service)
-	pip.Name = to.StringPtr(pipName)
-	pip.Location = to.StringPtr(az.Location)
-	pip.PublicIPAddressPropertiesFormat = &network.PublicIPAddressPropertiesFormat{
-		PublicIPAllocationMethod: network.Static,
+	if existsPip {
+		if getDomainNameLabel(&pip) == domainNameLabel {
+			return &pip, nil
+		}
+		klog.V(2).Infof("ensurePublicIPExists for service(%s): pip(%s) - updating", serviceName, *pip.Name)
+		if pip.PublicIPAddressPropertiesFormat == nil {
+			pip.PublicIPAddressPropertiesFormat = &network.PublicIPAddressPropertiesFormat{
+				PublicIPAllocationMethod: network.Static,
+			}
+		}
+	} else {
+		pip.Name = to.StringPtr(pipName)
+		pip.Location = to.StringPtr(az.Location)
+		pip.PublicIPAddressPropertiesFormat = &network.PublicIPAddressPropertiesFormat{
+			PublicIPAllocationMethod: network.Static,
+		}
+		pip.Tags = map[string]*string{"service": &serviceName}
+		if az.useStandardLoadBalancer() {
+			pip.Sku = &network.PublicIPAddressSku{
+				Name: network.PublicIPAddressSkuNameStandard,
+			}
+		}
+
+		klog.V(2).Infof("ensurePublicIPExists for service(%s): pip(%s) - creating", serviceName, *pip.Name)
 	}
-	if len(domainNameLabel) > 0 {
+
+	if len(domainNameLabel) == 0 {
+		pip.PublicIPAddressPropertiesFormat.DNSSettings = nil
+	} else {
 		pip.PublicIPAddressPropertiesFormat.DNSSettings = &network.PublicIPAddressDNSSettings{
 			DomainNameLabel: &domainNameLabel,
 		}
 	}
-	pip.Tags = map[string]*string{"service": &serviceName}
-	if az.useStandardLoadBalancer() {
-		pip.Sku = &network.PublicIPAddressSku{
-			Name: network.PublicIPAddressSkuNameStandard,
-		}
-	}
 
-	klog.V(2).Infof("ensurePublicIPExists for service(%s): pip(%s) - creating", serviceName, *pip.Name)
 	klog.V(10).Infof("CreateOrUpdatePIPWithRetry(%s, %q): start", pipResourceGroup, *pip.Name)
 	err = az.CreateOrUpdatePIPWithRetry(service, pipResourceGroup, pip)
 	if err != nil {
@@ -509,6 +522,13 @@ func (az *Cloud) ensurePublicIPExists(service *v1.Service, pipName string, domai
 		return nil, err
 	}
 	return &pip, nil
+}
+
+func getDomainNameLabel(pip *network.PublicIPAddress) string {
+	if pip == nil || pip.PublicIPAddressPropertiesFormat == nil || pip.PublicIPAddressPropertiesFormat.DNSSettings == nil {
+		return ""
+	}
+	return to.String(pip.PublicIPAddressPropertiesFormat.DNSSettings.DomainNameLabel)
 }
 
 func getIdleTimeout(s *v1.Service) (*int32, error) {
